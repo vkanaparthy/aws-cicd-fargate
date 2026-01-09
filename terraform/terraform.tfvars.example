@@ -1,0 +1,12 @@
+# Copy this file to terraform.tfvars and update with your values
+
+aws_region      = "us-east-1"
+app_name        = "nodejs-fargate-app"
+environment     = "production"
+vpc_cidr        = "10.0.0.0/16"
+container_port  = 3000
+container_cpu   = 256
+container_memory = 512
+desired_count   = 1
+min_capacity    = 1
+max_capacity    = 10
