@@ -172,26 +172,20 @@ jobs:
         echo "AppSpec file size: $(wc -c < appspec.yml) bytes"
         echo "Base64 content length: ${#APPSPEC_CONTENT} characters"
         
-        # 3. Create revision JSON file (more reliable than inline JSON)
-        # Use jq to properly escape the base64 string
-        jq -n \
-          --arg content "$APPSPEC_CONTENT" \
-          '{
-            revisionType: "AppSpecContent",
-            appSpecContent: {
-              content: $content
-            }
-          }' > revision.json
+        # 3. Create deployment YAML file with properly quoted content
+        # Use printf to avoid heredoc issues with special characters
+        printf 'applicationName: %s\ndeploymentGroupName: %s\nrevision:\n  revisionType: AppSpecContent\n  appSpecContent:\n    content: %s\n' \
+          "${{ env.CODEDEPLOY_APP }}" \
+          "${{ env.CODEDEPLOY_GROUP }}" \
+          "$APPSPEC_CONTENT" > deployment-input.yml
         
-        echo "Revision JSON:"
-        cat revision.json | head -c 200
+        echo "Deployment YAML created (first 200 chars):"
+        head -c 200 deployment-input.yml
         echo "..."
          
-        # 4. Create the deployment using the JSON file
+        # 4. Create the deployment using the YAML file
         DEPLOYMENT_ID=$(aws deploy create-deployment \
-          --application-name "${{ env.CODEDEPLOY_APP }}" \
-          --deployment-group-name "${{ env.CODEDEPLOY_GROUP }}" \
-          --revision file://revision.json \
+          --cli-input-yaml file://deployment-input.yml \
           --query 'deploymentId' \
           --output text)
         

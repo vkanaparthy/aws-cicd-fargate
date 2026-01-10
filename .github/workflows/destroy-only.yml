@@ -1,0 +1,60 @@
+name: Destroy Infrastructure Only
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "destroy" to confirm'
+        required: true
+        default: ''
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  destroy:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Validate confirmation
+      run: |
+        if [ "${{ github.event.inputs.confirm_destroy }}" != "destroy" ]; then
+          echo "❌ Confirmation failed. Please type 'destroy' to proceed."
+          exit 1
+        fi
+        echo "✅ Confirmation received"
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+
+    - name: Terraform Init
+      working-directory: terraform
+      run: terraform init
+
+    - name: Terraform Plan Destroy
+      working-directory: terraform
+      run: terraform plan -destroy
+
+    - name: Terraform Destroy
+      working-directory: terraform
+      run: terraform destroy -auto-approve
+
+    - name: Destroy Summary
+      run: |
+        echo "## Destroy Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ Infrastructure destroyed successfully" >> $GITHUB_STEP_SUMMARY

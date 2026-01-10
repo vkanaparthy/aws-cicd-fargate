@@ -1,0 +1,248 @@
+name: Cleanup Before Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "destroy" to confirm cleanup and destroy'
+        required: true
+        default: ''
+  repository_dispatch:
+    types: [cleanup-and-destroy]
+
+env:
+  AWS_REGION: us-east-1
+  ECS_CLUSTER: nodejs-fargate-app-cluster
+  ECS_SERVICE: nodejs-fargate-app-service
+  CODEDEPLOY_APP: nodejs-fargate-app-codedeploy-app
+  CODEDEPLOY_GROUP: nodejs-fargate-app-deployment-group
+
+jobs:
+  cleanup:
+    name: Cleanup Resources
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Validate confirmation
+      run: |
+        if [ "${{ github.event.inputs.confirm_destroy }}" != "destroy" ]; then
+          echo "❌ Confirmation failed. Please type 'destroy' to proceed."
+          echo "Received: '${{ github.event.inputs.confirm_destroy }}'"
+          exit 1
+        fi
+        echo "✅ Confirmation received"
+
+    - name: Stop CodeDeploy Deployments
+      id: stop-deployments
+      run: |
+        echo "Stopping all CodeDeploy deployments..."
+        
+        # Get all deployments
+        DEPLOYMENTS=$(aws deploy list-deployments \
+          --application-name "${{ env.CODEDEPLOY_APP }}" \
+          --deployment-group-name "${{ env.CODEDEPLOY_GROUP }}" \
+          --region "${{ env.AWS_REGION }}" \
+          --query 'deployments[]' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -z "$DEPLOYMENTS" ] || [ "$DEPLOYMENTS" = "None" ]; then
+          echo "No deployments found"
+          echo "deployments-stopped=true" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        STOPPED_COUNT=0
+        for DEPLOYMENT_ID in $DEPLOYMENTS; do
+          STATUS=$(aws deploy get-deployment \
+            --deployment-id "$DEPLOYMENT_ID" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'deploymentInfo.status' \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+          
+          echo "Deployment $DEPLOYMENT_ID: Status = $STATUS"
+          
+          if [ "$STATUS" = "InProgress" ] || [ "$STATUS" = "Ready" ] || [ "$STATUS" = "Created" ]; then
+            echo "  Stopping deployment $DEPLOYMENT_ID..."
+            aws deploy stop-deployment \
+              --deployment-id "$DEPLOYMENT_ID" \
+              --region "${{ env.AWS_REGION }}" || echo "  Failed to stop (may already be stopping)"
+            STOPPED_COUNT=$((STOPPED_COUNT + 1))
+          else
+            echo "  Deployment already in final state: $STATUS"
+          fi
+        done
+        
+        echo "Stopped $STOPPED_COUNT deployment(s)"
+        echo "deployments-stopped=true" >> $GITHUB_OUTPUT
+        
+        # Wait a bit for deployments to stop
+        if [ $STOPPED_COUNT -gt 0 ]; then
+          echo "Waiting 30 seconds for deployments to stop..."
+          sleep 30
+        fi
+
+    - name: Scale Down ECS Service
+      id: scale-down
+      run: |
+        echo "Scaling down ECS service to 0..."
+        
+        CURRENT_COUNT=$(aws ecs describe-services \
+          --cluster "${{ env.ECS_CLUSTER }}" \
+          --services "${{ env.ECS_SERVICE }}" \
+          --region "${{ env.AWS_REGION }}" \
+          --query 'services[0].desiredCount' \
+          --output text 2>/dev/null || echo "0")
+        
+        echo "Current desired count: $CURRENT_COUNT"
+        
+        if [ "$CURRENT_COUNT" != "0" ] && [ "$CURRENT_COUNT" != "None" ]; then
+          echo "Scaling down to 0..."
+          aws ecs update-service \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --service "${{ env.ECS_SERVICE }}" \
+            --desired-count 0 \
+            --region "${{ env.AWS_REGION }}"
+          
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --services "${{ env.ECS_SERVICE }}" \
+            --region "${{ env.AWS_REGION }}" || echo "Service scaled down"
+          
+          echo "service-scaled=true" >> $GITHUB_OUTPUT
+        else
+          echo "Service already scaled to 0"
+          echo "service-scaled=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Stop All Running Tasks
+      id: stop-tasks
+      run: |
+        echo "Stopping all running ECS tasks..."
+        
+        TASK_ARNS=$(aws ecs list-tasks \
+          --cluster "${{ env.ECS_CLUSTER }}" \
+          --service-name "${{ env.ECS_SERVICE }}" \
+          --region "${{ env.AWS_REGION }}" \
+          --query 'taskArns[]' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -z "$TASK_ARNS" ] || [ "$TASK_ARNS" = "None" ]; then
+          echo "No running tasks found"
+          echo "tasks-stopped=true" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        TASK_COUNT=0
+        for TASK_ARN in $TASK_ARNS; do
+          echo "Stopping task: $TASK_ARN"
+          aws ecs stop-task \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --task "$TASK_ARN" \
+            --region "${{ env.AWS_REGION }}" > /dev/null 2>&1 || echo "  Task already stopped"
+          TASK_COUNT=$((TASK_COUNT + 1))
+        done
+        
+        echo "Stopped $TASK_COUNT task(s)"
+        echo "tasks-stopped=true" >> $GITHUB_OUTPUT
+        
+        # Wait for tasks to stop
+        if [ $TASK_COUNT -gt 0 ]; then
+          echo "Waiting 20 seconds for tasks to stop..."
+          sleep 20
+        fi
+
+    - name: Delete ECS Service
+      id: delete-service
+      continue-on-error: true
+      run: |
+        echo "Deleting ECS service..."
+        
+        SERVICE_EXISTS=$(aws ecs describe-services \
+          --cluster "${{ env.ECS_CLUSTER }}" \
+          --services "${{ env.ECS_SERVICE }}" \
+          --region "${{ env.AWS_REGION }}" \
+          --query 'services[0].status' \
+          --output text 2>/dev/null || echo "NOT_FOUND")
+        
+        if [ "$SERVICE_EXISTS" != "NOT_FOUND" ] && [ "$SERVICE_EXISTS" != "None" ]; then
+          echo "Deleting service..."
+          aws ecs delete-service \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --service "${{ env.ECS_SERVICE }}" \
+            --force \
+            --region "${{ env.AWS_REGION }}" || echo "Service deletion initiated"
+          
+          echo "service-deleted=true" >> $GITHUB_OUTPUT
+        else
+          echo "Service not found or already deleted"
+          echo "service-deleted=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Cleanup Summary
+      run: |
+        echo "## Cleanup Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ CodeDeploy deployments stopped: ${{ steps.stop-deployments.outputs.deployments-stopped }}" >> $GITHUB_STEP_SUMMARY
+        echo "✅ ECS service scaled down: ${{ steps.scale-down.outputs.service-scaled }}" >> $GITHUB_STEP_SUMMARY
+        echo "✅ ECS tasks stopped: ${{ steps.stop-tasks.outputs.tasks-stopped }}" >> $GITHUB_STEP_SUMMARY
+        echo "✅ ECS service deleted: ${{ steps.delete-service.outputs.service-deleted }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Next Step:** Run Terraform destroy manually or trigger destroy workflow" >> $GITHUB_STEP_SUMMARY
+        
+        echo ""
+        echo "✅ Cleanup complete!"
+        echo ""
+        echo "You can now safely run:"
+        echo "  cd terraform"
+        echo "  terraform destroy"
+
+  destroy:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+    needs: cleanup
+    if: github.event.inputs.confirm_destroy == 'destroy'
+    environment: production
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+
+    - name: Terraform Init
+      working-directory: terraform
+      run: terraform init
+
+    - name: Terraform Destroy
+      working-directory: terraform
+      run: |
+        echo "Destroying infrastructure..."
+        terraform destroy -auto-approve
+
+    - name: Destroy Summary
+      run: |
+        echo "## Destroy Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ Infrastructure destroyed successfully" >> $GITHUB_STEP_SUMMARY
