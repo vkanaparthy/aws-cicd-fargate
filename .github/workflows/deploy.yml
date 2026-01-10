@@ -144,47 +144,58 @@ jobs:
         CONTAINER_NAME: ${{ steps.ecs-service-info.outputs.container-name }}
         CONTAINER_PORT: ${{ steps.ecs-service-info.outputs.container-port }}
       run: |
-        # Using env variables inside the heredoc is safer for YAML formatting
-        cat <<EOF > appspec.yml
-        version: 0.0
-        Resources:
-          - TargetService:
-              Type: AWS::ECS::Service
-              Properties:
-                TaskDefinition: "$TASK_DEF_ARN"
-                LoadBalancerInfo:
-                  ContainerName: "$CONTAINER_NAME"
-                  ContainerPort: $CONTAINER_PORT
-                PlatformVersion: "LATEST"
-                NetworkConfiguration:
-                  AwsvpcConfiguration:
-                    Subnets:
-                      - "$SUBNET_1"
-                      - "$SUBNET_2"
-                    SecurityGroups:
-                      - "$SECURITY_GROUP"
-                    AssignPublicIp: "DISABLED"
-        EOF
+        # Generate AppSpec file with proper YAML formatting
+        # Using printf to avoid heredoc indentation issues
+        printf 'version: 0.0\nResources:\n  - TargetService:\n      Type: AWS::ECS::Service\n      Properties:\n        TaskDefinition: "%s"\n        LoadBalancerInfo:\n          ContainerName: "%s"\n          ContainerPort: %s\n        PlatformVersion: "LATEST"\n        NetworkConfiguration:\n          AwsvpcConfiguration:\n            Subnets:\n              - "%s"\n              - "%s"\n            SecurityGroups:\n              - "%s"\n            AssignPublicIp: "DISABLED"\n' \
+          "$TASK_DEF_ARN" \
+          "$CONTAINER_NAME" \
+          "$CONTAINER_PORT" \
+          "$SUBNET_1" \
+          "$SUBNET_2" \
+          "$SECURITY_GROUP" > appspec.yml
         
         echo "Generated AppSpec file:"
         cat appspec.yml
+        
+        # Validate YAML syntax (basic check)
+        if ! grep -q "version: 0.0" appspec.yml; then
+          echo "Error: AppSpec file appears to be invalid"
+          exit 1
+        fi
     - name: Create CodeDeploy Deployment
       id: deploy
       run: |
-        # 1. Base64 encode the appspec file
+        # 1. Base64 encode the appspec file (no line breaks)
         APPSPEC_CONTENT=$(cat appspec.yml | base64 -w 0)
         
-        echo "APPSPEC_CONTENT=$APPSPEC_CONTENT" >> $GITHUB_OUTPUT
+        # 2. Validate the base64 content
+        echo "AppSpec file size: $(wc -c < appspec.yml) bytes"
+        echo "Base64 content length: ${#APPSPEC_CONTENT} characters"
+        
+        # 3. Create revision JSON file (more reliable than inline JSON)
+        # Use jq to properly escape the base64 string
+        jq -n \
+          --arg content "$APPSPEC_CONTENT" \
+          '{
+            revisionType: "AppSpecContent",
+            appSpecContent: {
+              content: $content
+            }
+          }' > revision.json
+        
+        echo "Revision JSON:"
+        cat revision.json | head -c 200
+        echo "..."
          
-        # 2. Create the deployment
+        # 4. Create the deployment using the JSON file
         DEPLOYMENT_ID=$(aws deploy create-deployment \
-          --application-name "$CODEDEPLOY_APP" \
-          --deployment-group-name "$CODEDEPLOY_GROUP" \
-          --revision "revisionType=AppSpecContent,appSpecContent={content='$APPSPEC_CONTENT'}" \
+          --application-name "${{ env.CODEDEPLOY_APP }}" \
+          --deployment-group-name "${{ env.CODEDEPLOY_GROUP }}" \
+          --revision file://revision.json \
           --query 'deploymentId' \
           --output text)
         
-        # 3. Save to output
+        # 5. Save to output
         echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
         echo "Created CodeDeploy deployment: $DEPLOYMENT_ID"
 
