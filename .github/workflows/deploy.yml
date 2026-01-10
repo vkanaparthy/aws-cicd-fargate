@@ -52,10 +52,15 @@ jobs:
     - name: Download task definition from ECS
       id: task-def
       run: |
+        # Generate the JSON file
         aws ecs describe-task-definition \
           --task-definition nodejs-fargate-app-task \
           --query 'taskDefinition' > task-definition.json
-        echo "task-definition.json=$(cat task-definition.json)" >> $GITHUB_OUTPUT
+
+        # Write to GITHUB_OUTPUT using multiline syntax
+        echo "task-definition<<EOF" >> $GITHUB_OUTPUT
+        cat task-definition.json >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
 
     - name: Register new task definition
       id: register-task-def
