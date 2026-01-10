@@ -65,6 +65,10 @@ jobs:
     - name: Register new task definition
       id: register-task-def
       run: |
+        cat <<EOF > task-definition.json
+        ${{ steps.task-def.outputs.task-definition }}
+        EOF
+
         TASK_DEF_ARN=$(aws ecs register-task-definition \
           --cli-input-json "file://task-definition.json" \
           --query 'taskDefinition.taskDefinitionArn' \
