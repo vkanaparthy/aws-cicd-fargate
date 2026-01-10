@@ -1,0 +1,24 @@
+applicationName: nodejs-fargate-app-codedeploy-app
+deploymentGroupName: nodejs-fargate-app-deployment-group
+revision:
+  revisionType: AppSpecContent
+  appSpecContent:
+    content: |
+      version: 0.0
+      Resources:
+        - TargetService:
+            Type: AWS::ECS::Service
+            Properties:
+              TaskDefinition: "arn:aws:ecs:us-east-1:417669728734:task-definition/nodejs-fargate-app-task:10"
+              LoadBalancerInfo:
+                ContainerName: "nodejs-fargate-app"
+                ContainerPort: 3000
+              PlatformVersion: "LATEST"
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  Subnets:
+                    - "subnet-06c9dd97a7f10628d"
+                    - "subnet-0751de53d9d39851b"
+                  SecurityGroups:
+                    - "sg-00197eabccd31edd2"
+                  AssignPublicIp: "DISABLED"
