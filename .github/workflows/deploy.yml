@@ -8,7 +8,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: nodejs-fargate-app
+  ECR_REPOSITORY: dev
   ECS_SERVICE: nodejs-fargate-app-service
   ECS_CLUSTER: nodejs-fargate-app-cluster
   ECS_TASK_FAMILY: nodejs-fargate-app-task
