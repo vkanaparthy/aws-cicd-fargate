@@ -69,8 +69,14 @@ jobs:
         ${{ steps.task-def.outputs.task-definition }}
         EOF
 
+        # 2. Clean the JSON and add the required 'family' field
+        # We delete the read-only fields and set the family name from your env variables
+        jq --arg FAMILY "$ECS_TASK_FAMILY" \
+          'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy) | . + {family: $FAMILY}' \
+          raw-task-definition.json > cleaned-task-definition.json
+
         TASK_DEF_ARN=$(aws ecs register-task-definition \
-          --cli-input-json "file://task-definition.json" \
+          --cli-input-json "file://cleaned-task-definition.json" \
           --query 'taskDefinition.taskDefinitionArn' \
           --output text)
     
