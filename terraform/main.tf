@@ -71,8 +71,6 @@ resource "aws_subnet" "private" {
   )
 }
 
-# NAT Gateways removed - Using VPC Endpoints instead for AWS services
-# This eliminates NAT Gateway costs (~$32-64/month) and improves security
 
 # Route Table for Public Subnets
 resource "aws_route_table" "public" {
@@ -100,7 +98,6 @@ resource "aws_route_table_association" "public" {
 }
 
 # Route Tables for Private Subnets
-# No NAT Gateway routes - using VPC Endpoints for AWS services instead
 resource "aws_route_table" "private" {
   count  = 2 # Always 2 for ALB requirement
   vpc_id = aws_vpc.main.id
@@ -655,6 +652,64 @@ resource "aws_iam_role_policy_attachment" "codedeploy" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole"
 }
 
+# Additional IAM policy for ECS CodeDeploy operations
+resource "aws_iam_role_policy" "codedeploy_ecs" {
+  name = "${var.app_name}-codedeploy-ecs-policy"
+  role = aws_iam_role.codedeploy.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:DescribeServices",
+          "ecs:DescribeTaskDefinition",
+          "ecs:DescribeTasks",
+          "ecs:ListTasks",
+          "ecs:RegisterTaskDefinition",
+          "ecs:UpdateService",
+          "ecs:CreateTaskSet",
+          "ecs:DeleteTaskSet",
+          "ecs:DescribeTaskSets",
+          "ecs:UpdateServicePrimaryTaskSet",
+          "ecs:TagResource",
+          "ecs:UntagResource"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole"
+        ]
+        Resource = [
+          aws_iam_role.ecs_task_execution.arn,
+          aws_iam_role.ecs_task.arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeListeners",
+          "elasticloadbalancing:ModifyListener",
+          "elasticloadbalancing:DescribeRules",
+          "elasticloadbalancing:ModifyRule"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:DescribeAlarms"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 # CodeDeploy Application
 resource "aws_codedeploy_app" "main" {
   compute_platform = "ECS"
@@ -674,14 +729,32 @@ resource "aws_codedeploy_deployment_group" "main" {
   app_name              = aws_codedeploy_app.main.name
   deployment_group_name = "${var.app_name}-deployment-group"
   service_role_arn      = aws_iam_role.codedeploy.arn
+  # Use ECS-specific deployment config for blue/green
+  deployment_config_name = "CodeDeployDefault.ECSAllAtOnce"
 
   ecs_service {
     cluster_name = aws_ecs_cluster.main.name
     service_name = aws_ecs_service.main.name
   }
 
-  # Target groups are specified in AppSpec file, not here
-  # CodeDeploy will use the target groups defined in the AppSpec file during deployment
+  deployment_style {
+    deployment_type   = "BLUE_GREEN"
+    deployment_option = "WITH_TRAFFIC_CONTROL"
+  }
+
+  load_balancer_info {
+    target_group_pair_info {
+      target_group {
+        name = aws_lb_target_group.blue.name
+      }
+      target_group {
+        name = aws_lb_target_group.green.name
+      }
+      prod_traffic_route {
+        listener_arns = [aws_lb_listener.main.arn]
+      }
+    }
+  }
 
   blue_green_deployment_config {
     deployment_ready_option {
@@ -689,9 +762,8 @@ resource "aws_codedeploy_deployment_group" "main" {
       wait_time_in_minutes = 0
     }
 
-    green_fleet_provisioning_option {
-      action = "DISCOVER_EXISTING"
-    }
+    # green_fleet_provisioning_option is not supported for ECS platform
+    # CodeDeploy automatically provisions the green fleet for ECS
 
     terminate_blue_instances_on_deployment_success {
       action                           = "TERMINATE"
