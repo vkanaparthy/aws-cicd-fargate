@@ -57,3 +57,9 @@ variable "max_capacity" {
   type        = number
   default     = 10
 }
+
+variable "multi_az" {
+  description = "Enable multi-AZ deployment (false for single-AZ dev environment)"
+  type        = bool
+  default     = true
+}

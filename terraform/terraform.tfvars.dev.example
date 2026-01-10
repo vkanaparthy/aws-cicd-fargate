@@ -1,0 +1,14 @@
+# Development Environment Configuration
+# Single-AZ setup for cost savings (~$32/month savings on NAT Gateway)
+
+aws_region      = "us-east-1"
+app_name        = "nodejs-fargate-app"
+environment     = "dev"
+vpc_cidr        = "10.0.0.0/16"
+container_port  = 3000
+container_cpu   = 256   # 0.25 vCPU
+container_memory = 512  # 512 MB
+desired_count   = 1     # Start with 1 task
+min_capacity    = 1
+max_capacity    = 5     # Lower max for dev
+multi_az        = false # Single-AZ: Uses 1 NAT Gateway (saves ~$32/month)

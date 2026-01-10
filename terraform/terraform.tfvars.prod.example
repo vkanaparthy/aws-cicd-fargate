@@ -1,0 +1,14 @@
+# Production Environment Configuration
+# Multi-AZ setup for high availability
+
+aws_region      = "us-east-1"
+app_name        = "nodejs-fargate-app"
+environment     = "production"
+vpc_cidr        = "10.0.0.0/16"
+container_port  = 3000
+container_cpu   = 512   # 0.5 vCPU (more resources for production)
+container_memory = 1024 # 1 GB (more memory for production)
+desired_count   = 2     # Start with 2 tasks for redundancy
+min_capacity    = 2     # Minimum 2 tasks for high availability
+max_capacity    = 10    # Higher max for production traffic
+multi_az        = true  # Multi-AZ: Uses 2 NAT Gateways (high availability)

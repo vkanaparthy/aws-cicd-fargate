@@ -72,8 +72,9 @@ resource "aws_subnet" "private" {
 }
 
 # Elastic IPs for NAT Gateways
+# Use 1 NAT Gateway for single-AZ, 2 for multi-AZ
 resource "aws_eip" "nat" {
-  count  = 2
+  count  = var.multi_az ? 2 : 1
   domain = "vpc"
 
   tags = merge(
@@ -86,8 +87,9 @@ resource "aws_eip" "nat" {
 }
 
 # NAT Gateways
+# Single NAT Gateway for dev (cost savings), 2 for production (high availability)
 resource "aws_nat_gateway" "main" {
-  count         = 2
+  count         = var.multi_az ? 2 : 1
   allocation_id = aws_eip.nat[count.index].id
   subnet_id     = aws_subnet.public[count.index].id
 
@@ -126,13 +128,16 @@ resource "aws_route_table_association" "public" {
 }
 
 # Route Tables for Private Subnets
+# In single-AZ mode, both private subnets route through the single NAT Gateway
 resource "aws_route_table" "private" {
-  count  = 2
+  count  = var.multi_az ? 2 : 2  # Always 2 for ALB requirement, but route differently
   vpc_id = aws_vpc.main.id
 
   route {
     cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main[count.index].id
+    # In single-AZ mode, both route tables use the single NAT Gateway (index 0)
+    # In multi-AZ mode, each uses its own NAT Gateway
+    nat_gateway_id = var.multi_az ? aws_nat_gateway.main[count.index].id : aws_nat_gateway.main[0].id
   }
 
   tags = merge(
