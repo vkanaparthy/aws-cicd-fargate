@@ -88,16 +88,37 @@ jobs:
       run: |
         # 1. Get service details into a single variable
         SERVICE_INFO=$(aws ecs describe-services \
-          --cluster "$ECS_CLUSTER" \
-          --services "$ECS_SERVICE" \
+          --cluster "${{ env.ECS_CLUSTER }}" \
+          --services "${{ env.ECS_SERVICE }}" \
           --query 'services[0]')
+        
+        # Check if service exists
+        if [ "$(echo $SERVICE_INFO | jq -r '.status')" != "ACTIVE" ]; then
+          echo "Error: ECS service not found or not active"
+          echo "Service status: $(echo $SERVICE_INFO | jq -r '.status')"
+          exit 1
+        fi
         
         # 2. Parse values using jq
         SUBNET_1=$(echo $SERVICE_INFO | jq -r '.networkConfiguration.awsvpcConfiguration.subnets[0]')
         SUBNET_2=$(echo $SERVICE_INFO | jq -r '.networkConfiguration.awsvpcConfiguration.subnets[1]')
         SECURITY_GROUP=$(echo $SERVICE_INFO | jq -r '.networkConfiguration.awsvpcConfiguration.securityGroups[0]')
-        CONT_NAME=$(echo $SERVICE_INFO | jq -r '.loadBalancers[0].containerName')
-        CONT_PORT=$(echo $SERVICE_INFO | jq -r '.loadBalancers[0].containerPort')
+        CONT_NAME=$(echo $SERVICE_INFO | jq -r '.loadBalancers[0].containerName // "${{ env.CONTAINER_NAME }}"')
+        CONT_PORT=$(echo $SERVICE_INFO | jq -r '.loadBalancers[0].containerPort // 3000')
+        
+        # Validate required values
+        if [ -z "$SUBNET_1" ] || [ "$SUBNET_1" = "null" ]; then
+          echo "Error: SUBNET_1 is empty or null"
+          exit 1
+        fi
+        if [ -z "$SUBNET_2" ] || [ "$SUBNET_2" = "null" ]; then
+          echo "Error: SUBNET_2 is empty or null"
+          exit 1
+        fi
+        if [ -z "$SECURITY_GROUP" ] || [ "$SECURITY_GROUP" = "null" ]; then
+          echo "Error: SECURITY_GROUP is empty or null"
+          exit 1
+        fi
         
         # 3. Write to GITHUB_OUTPUT
         echo "subnet-1=$SUBNET_1" >> $GITHUB_OUTPUT
@@ -105,42 +126,48 @@ jobs:
         echo "security-group=$SECURITY_GROUP" >> $GITHUB_OUTPUT
         echo "container-name=$CONT_NAME" >> $GITHUB_OUTPUT
         echo "container-port=$CONT_PORT" >> $GITHUB_OUTPUT
+        
+        echo "Extracted values:"
+        echo "  SUBNET_1: $SUBNET_1"
+        echo "  SUBNET_2: $SUBNET_2"
+        echo "  SECURITY_GROUP: $SECURITY_GROUP"
+        echo "  CONTAINER_NAME: $CONT_NAME"
+        echo "  CONTAINER_PORT: $CONT_PORT"
 
-        - name: Prepare AppSpec file
-        id: prepare-appspec
-        env:
-          TASK_DEF_ARN: ${{ steps.register-task-def.outputs.task-def-arn }}
-          SUBNET_1: ${{ steps.ecs-service-info.outputs.subnet-1 }}
-          SUBNET_2: ${{ steps.ecs-service-info.outputs.subnet-2 }}
-          SECURITY_GROUP: ${{ steps.ecs-service-info.outputs.security-group }}
-          CONTAINER_NAME: ${{ steps.ecs-service-info.outputs.container-name }}
-          CONTAINER_PORT: ${{ steps.ecs-service-info.outputs.container-port }}
-        run: |
-          # Using env variables inside the heredoc is safer for YAML formatting
-          cat <<EOF > appspec.yml
-          version: 0.0
-          Resources:
-            - TargetService:
-                Type: AWS::ECS::Service
-                Properties:
-                  TaskDefinition: "$TASK_DEF_ARN"
-                  LoadBalancerInfo:
-                    ContainerName: "$CONTAINER_NAME"
-                    ContainerPort: $CONTAINER_PORT
-                  PlatformVersion: "LATEST"
-                  NetworkConfiguration:
-                    AwsvpcConfiguration:
-                      Subnets:
-                        - "$SUBNET_1"
-                        - "$SUBNET_2"
-                      SecurityGroups:
-                        - "$SECURITY_GROUP"
-                      AssignPublicIp: "DISABLED"
-          EOF
-          
-          echo "Generated AppSpec file:"
-          cat appspec.yml
-          
+    - name: Prepare AppSpec file
+      id: prepare-appspec
+      env:
+        TASK_DEF_ARN: ${{ steps.register-task-def.outputs.task-def-arn }}
+        SUBNET_1: ${{ steps.ecs-service-info.outputs.subnet-1 }}
+        SUBNET_2: ${{ steps.ecs-service-info.outputs.subnet-2 }}
+        SECURITY_GROUP: ${{ steps.ecs-service-info.outputs.security-group }}
+        CONTAINER_NAME: ${{ steps.ecs-service-info.outputs.container-name }}
+        CONTAINER_PORT: ${{ steps.ecs-service-info.outputs.container-port }}
+      run: |
+        # Using env variables inside the heredoc is safer for YAML formatting
+        cat <<EOF > appspec.yml
+        version: 0.0
+        Resources:
+          - TargetService:
+              Type: AWS::ECS::Service
+              Properties:
+                TaskDefinition: "$TASK_DEF_ARN"
+                LoadBalancerInfo:
+                  ContainerName: "$CONTAINER_NAME"
+                  ContainerPort: $CONTAINER_PORT
+                PlatformVersion: "LATEST"
+                NetworkConfiguration:
+                  AwsvpcConfiguration:
+                    Subnets:
+                      - "$SUBNET_1"
+                      - "$SUBNET_2"
+                    SecurityGroups:
+                      - "$SECURITY_GROUP"
+                    AssignPublicIp: "DISABLED"
+        EOF
+        
+        echo "Generated AppSpec file:"
+        cat appspec.yml
     - name: Create CodeDeploy Deployment
       id: deploy
       run: |
