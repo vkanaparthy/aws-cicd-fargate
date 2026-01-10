@@ -7,8 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1
-  AWS_PROFILE: vk
+  AWS_REGION: us-east-1  
   ECR_REPOSITORY: dev
   ECS_SERVICE: nodejs-fargate-app-service
   ECS_CLUSTER: nodejs-fargate-app-cluster
