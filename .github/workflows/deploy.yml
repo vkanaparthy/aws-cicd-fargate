@@ -106,45 +106,49 @@ jobs:
         echo "container-name=$CONT_NAME" >> $GITHUB_OUTPUT
         echo "container-port=$CONT_PORT" >> $GITHUB_OUTPUT
 
-    - name: Prepare AppSpec file
-      run: |
-        TASK_DEF_ARN="${{ steps.register-task-def.outputs.task-def-arn }}"
-        SUBNET_1="${{ steps.ecs-service-info.outputs.subnet-1 }}"
-        SUBNET_2="${{ steps.ecs-service-info.outputs.subnet-2 }}"
-        SECURITY_GROUP="${{ steps.ecs-service-info.outputs.security-group }}"
-        CONTAINER_NAME="${{ steps.ecs-service-info.outputs.container-name }}"
-        CONTAINER_PORT="${{ steps.ecs-service-info.outputs.container-port }}"
-        
-        cat > appspec.yml <<EOF
-        version: 0.0
-        Resources:
-          - TargetService:
-              Type: AWS::ECS::Service
-              Properties:
-                TaskDefinition: "$TASK_DEF_ARN"
-                LoadBalancerInfo:
-                  ContainerName: "$CONTAINER_NAME"
-                  ContainerPort: $CONTAINER_PORT
-                PlatformVersion: "LATEST"
-                NetworkConfiguration:
-                  AwsvpcConfiguration:
-                    Subnets:
-                      - "$SUBNET_1"
-                      - "$SUBNET_2"
-                    SecurityGroups:
-                      - "$SECURITY_GROUP"
-                    AssignPublicIp: "DISABLED"
-        EOF
-        
-        echo "Generated AppSpec file:"
-        cat appspec.yml
-
+        - name: Prepare AppSpec file
+        id: prepare-appspec
+        env:
+          TASK_DEF_ARN: ${{ steps.register-task-def.outputs.task-def-arn }}
+          SUBNET_1: ${{ steps.ecs-service-info.outputs.subnet-1 }}
+          SUBNET_2: ${{ steps.ecs-service-info.outputs.subnet-2 }}
+          SECURITY_GROUP: ${{ steps.ecs-service-info.outputs.security-group }}
+          CONTAINER_NAME: ${{ steps.ecs-service-info.outputs.container-name }}
+          CONTAINER_PORT: ${{ steps.ecs-service-info.outputs.container-port }}
+        run: |
+          # Using env variables inside the heredoc is safer for YAML formatting
+          cat <<EOF > appspec.yml
+          version: 0.0
+          Resources:
+            - TargetService:
+                Type: AWS::ECS::Service
+                Properties:
+                  TaskDefinition: "$TASK_DEF_ARN"
+                  LoadBalancerInfo:
+                    ContainerName: "$CONTAINER_NAME"
+                    ContainerPort: $CONTAINER_PORT
+                  PlatformVersion: "LATEST"
+                  NetworkConfiguration:
+                    AwsvpcConfiguration:
+                      Subnets:
+                        - "$SUBNET_1"
+                        - "$SUBNET_2"
+                      SecurityGroups:
+                        - "$SECURITY_GROUP"
+                      AssignPublicIp: "DISABLED"
+          EOF
+          
+          echo "Generated AppSpec file:"
+          cat appspec.yml
+          
     - name: Create CodeDeploy Deployment
       id: deploy
       run: |
         # 1. Base64 encode the appspec file
         APPSPEC_CONTENT=$(cat appspec.yml | base64 -w 0)
         
+        echo "APPSPEC_CONTENT=$APPSPEC_CONTENT" >> $GITHUB_OUTPUT
+         
         # 2. Create the deployment
         DEPLOYMENT_ID=$(aws deploy create-deployment \
           --application-name "$CODEDEPLOY_APP" \
