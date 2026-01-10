@@ -71,36 +71,8 @@ resource "aws_subnet" "private" {
   )
 }
 
-# Elastic IPs for NAT Gateways
-# Use 1 NAT Gateway for single-AZ, 2 for multi-AZ
-resource "aws_eip" "nat" {
-  count  = var.multi_az ? 2 : 1
-  domain = "vpc"
-
-  tags = merge(
-    {
-      Name        = "${var.app_name}-nat-eip-${count.index + 1}"
-      Environment = var.environment
-    },
-    local.common_tags
-  )
-}
-
-# NAT Gateways
-# Single NAT Gateway for dev (cost savings), 2 for production (high availability)
-resource "aws_nat_gateway" "main" {
-  count         = var.multi_az ? 2 : 1
-  allocation_id = aws_eip.nat[count.index].id
-  subnet_id     = aws_subnet.public[count.index].id
-
-  tags = merge(
-    {
-      Name        = "${var.app_name}-nat-${count.index + 1}"
-      Environment = var.environment
-    },
-    local.common_tags
-  )
-}
+# NAT Gateways removed - Using VPC Endpoints instead for AWS services
+# This eliminates NAT Gateway costs (~$32-64/month) and improves security
 
 # Route Table for Public Subnets
 resource "aws_route_table" "public" {
@@ -128,17 +100,13 @@ resource "aws_route_table_association" "public" {
 }
 
 # Route Tables for Private Subnets
-# In single-AZ mode, both private subnets route through the single NAT Gateway
+# No NAT Gateway routes - using VPC Endpoints for AWS services instead
 resource "aws_route_table" "private" {
-  count  = var.multi_az ? 2 : 2  # Always 2 for ALB requirement, but route differently
+  count  = 2 # Always 2 for ALB requirement
   vpc_id = aws_vpc.main.id
 
-  route {
-    cidr_block     = "0.0.0.0/0"
-    # In single-AZ mode, both route tables use the single NAT Gateway (index 0)
-    # In multi-AZ mode, each uses its own NAT Gateway
-    nat_gateway_id = var.multi_az ? aws_nat_gateway.main[count.index].id : aws_nat_gateway.main[0].id
-  }
+  # No default route - private subnets don't need internet access
+  # AWS services accessed via VPC Endpoints
 
   tags = merge(
     {
@@ -221,6 +189,105 @@ resource "aws_security_group" "ecs_tasks" {
   )
 }
 
+# Security Group for VPC Endpoints
+resource "aws_security_group" "vpc_endpoint" {
+  name        = "${var.app_name}-vpc-endpoint-sg"
+  description = "Security group for VPC Endpoints"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(
+    {
+      Name        = "${var.app_name}-vpc-endpoint-sg"
+      Environment = var.environment
+    },
+    local.common_tags
+  )
+}
+
+# VPC Endpoint for ECR Docker API (for pulling images)
+resource "aws_vpc_endpoint" "ecr_dkr" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoint.id]
+  private_dns_enabled = true
+
+  tags = merge(
+    {
+      Name        = "${var.app_name}-ecr-dkr-endpoint"
+      Environment = var.environment
+    },
+    local.common_tags
+  )
+}
+
+# VPC Endpoint for ECR API (for image metadata)
+resource "aws_vpc_endpoint" "ecr_api" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoint.id]
+  private_dns_enabled = true
+
+  tags = merge(
+    {
+      Name        = "${var.app_name}-ecr-api-endpoint"
+      Environment = var.environment
+    },
+    local.common_tags
+  )
+}
+
+# VPC Endpoint for CloudWatch Logs
+resource "aws_vpc_endpoint" "cloudwatch_logs" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoint.id]
+  private_dns_enabled = true
+
+  tags = merge(
+    {
+      Name        = "${var.app_name}-cloudwatch-logs-endpoint"
+      Environment = var.environment
+    },
+    local.common_tags
+  )
+}
+
+# VPC Endpoint for S3 (Gateway endpoint - no cost)
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = aws_route_table.private[*].id
+
+  tags = merge(
+    {
+      Name        = "${var.app_name}-s3-endpoint"
+      Environment = var.environment
+    },
+    local.common_tags
+  )
+}
+
 # Application Load Balancer
 resource "aws_lb" "main" {
   name               = "${var.app_name}-alb"
@@ -240,9 +307,9 @@ resource "aws_lb" "main" {
   )
 }
 
-# Target Group
-resource "aws_lb_target_group" "main" {
-  name        = "${var.app_name}-tg"
+# Target Group - Blue (Production)
+resource "aws_lb_target_group" "blue" {
+  name        = "${var.app_name}-tg-blue"
   port        = var.container_port
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -260,14 +327,41 @@ resource "aws_lb_target_group" "main" {
 
   tags = merge(
     {
-      Name        = "${var.app_name}-tg"
+      Name        = "${var.app_name}-tg-blue"
       Environment = var.environment
     },
     local.common_tags
   )
 }
 
-# ALB Listener
+# Target Group - Green (New deployment)
+resource "aws_lb_target_group" "green" {
+  name        = "${var.app_name}-tg-green"
+  port        = var.container_port
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+    interval            = 30
+    path                = "/health"
+    matcher             = "200"
+  }
+
+  tags = merge(
+    {
+      Name        = "${var.app_name}-tg-green"
+      Environment = var.environment
+    },
+    local.common_tags
+  )
+}
+
+# ALB Listener - Initially points to blue target group
 resource "aws_lb_listener" "main" {
   load_balancer_arn = aws_lb.main.arn
   port              = "80"
@@ -275,7 +369,7 @@ resource "aws_lb_listener" "main" {
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.main.arn
+    target_group_arn = aws_lb_target_group.blue.arn
   }
 }
 
@@ -449,7 +543,7 @@ resource "aws_ecs_task_definition" "app" {
   )
 }
 
-# ECS Service
+# ECS Service - Configured for blue/green deployments with CodeDeploy
 resource "aws_ecs_service" "main" {
   name            = "${var.app_name}-service"
   cluster         = aws_ecs_cluster.main.id
@@ -464,13 +558,19 @@ resource "aws_ecs_service" "main" {
   }
 
   load_balancer {
-    target_group_arn = aws_lb_target_group.main.arn
+    target_group_arn = aws_lb_target_group.blue.arn
     container_name   = var.app_name
     container_port   = var.container_port
   }
 
+  # Enable blue/green deployments
+  deployment_controller {
+    type = "CODE_DEPLOY"
+  }
+
   depends_on = [
     aws_lb_listener.main,
+    aws_codedeploy_app.main,
   ]
 
   tags = merge(
@@ -521,4 +621,94 @@ resource "aws_appautoscaling_policy" "ecs_policy_memory" {
     }
     target_value = 80.0
   }
+}
+
+# IAM Role for CodeDeploy
+resource "aws_iam_role" "codedeploy" {
+  name = "${var.app_name}-codedeploy-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "codedeploy.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = merge(
+    {
+      Name        = "${var.app_name}-codedeploy-role"
+      Environment = var.environment
+    },
+    local.common_tags
+  )
+}
+
+# Attach CodeDeploy service role policy
+resource "aws_iam_role_policy_attachment" "codedeploy" {
+  role       = aws_iam_role.codedeploy.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole"
+}
+
+# CodeDeploy Application
+resource "aws_codedeploy_app" "main" {
+  compute_platform = "ECS"
+  name             = "${var.app_name}-codedeploy-app"
+
+  tags = merge(
+    {
+      Name        = "${var.app_name}-codedeploy-app"
+      Environment = var.environment
+    },
+    local.common_tags
+  )
+}
+
+# CodeDeploy Deployment Group
+resource "aws_codedeploy_deployment_group" "main" {
+  app_name              = aws_codedeploy_app.main.name
+  deployment_group_name = "${var.app_name}-deployment-group"
+  service_role_arn      = aws_iam_role.codedeploy.arn
+
+  ecs_service {
+    cluster_name = aws_ecs_cluster.main.name
+    service_name = aws_ecs_service.main.name
+  }
+
+  # Target groups are specified in AppSpec file, not here
+  # CodeDeploy will use the target groups defined in the AppSpec file during deployment
+
+  blue_green_deployment_config {
+    deployment_ready_option {
+      action_on_timeout    = "CONTINUE_DEPLOYMENT"
+      wait_time_in_minutes = 0
+    }
+
+    green_fleet_provisioning_option {
+      action = "DISCOVER_EXISTING"
+    }
+
+    terminate_blue_instances_on_deployment_success {
+      action                           = "TERMINATE"
+      termination_wait_time_in_minutes = 5
+    }
+  }
+
+  auto_rollback_configuration {
+    enabled = true
+    events  = ["DEPLOYMENT_FAILURE"]
+  }
+
+  tags = merge(
+    {
+      Name        = "${var.app_name}-deployment-group"
+      Environment = var.environment
+    },
+    local.common_tags
+  )
 }

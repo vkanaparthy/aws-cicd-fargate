@@ -1,0 +1,170 @@
+@startuml AWS ECS Fargate Architecture
+!include <aws/common>
+!include <aws/Compute/EC2/EC2>
+!include <aws/Compute/EC2/Instance/Instance>
+!include <aws/NetworkContentDelivery/VPC/VPC>
+!include <aws/NetworkContentDelivery/VPC/Subnet/Subnet>
+!include <aws/NetworkContentDelivery/Route53/Route53>
+!include <aws/NetworkContentDelivery/CloudFront/CloudFront>
+!include <aws/NetworkContentDelivery/ElasticLoadBalancing/ApplicationLoadBalancer/ApplicationLoadBalancer>
+!include <aws/Compute/ECS/ECS>
+!include <aws/Compute/ECS/Container/Container>
+!include <aws/Storage/SimpleStorageServiceS3/S3>
+!include <aws/ApplicationIntegration/SimpleNotificationServiceSNS/SNS>
+!include <aws/ManagementGovernance/CloudWatch/CloudWatch>
+!include <aws/DeveloperTools/CodeCommit/CodeCommit>
+!include <aws/DeveloperTools/CodeBuild/CodeBuild>
+!include <aws/DeveloperTools/CodeDeploy/CodeDeploy>
+!include <aws/DeveloperTools/CodePipeline/CodePipeline>
+!include <aws/SecurityIdentityCompliance/IAM/IAM>
+!include <aws/SecurityIdentityCompliance/IAM/IAMRole/IAMRole>
+!include <aws/DeveloperTools/ECR/ECR>
+
+skinparam linetype ortho
+
+title AWS ECS Fargate CI/CD Architecture - Single-AZ Configuration (Development)
+note right
+  Configuration: multi_az = false
+  NAT Gateways: 1 (~$32/month)
+  Cost Optimized for Development
+end note
+
+' Internet
+cloud "Internet" as internet #lightblue
+
+' VPC
+VPC(vpc, "VPC\nnodejs-fargate-app-vpc\n10.0.0.0/16", "DNS Enabled")
+
+' Internet Gateway
+rectangle "Internet Gateway\nnodejs-fargate-app-igw" as igw #lightgreen
+
+' Availability Zones
+rectangle "Availability Zone 1\n(us-east-1a)" as az1 #lightyellow
+rectangle "Availability Zone 2\n(us-east-1b)" as az2 #lightyellow
+
+' Public Subnets
+Subnet(public_subnet1, "Public Subnet 1\n10.0.0.0/24", "AZ 1")
+Subnet(public_subnet2, "Public Subnet 2\n10.0.1.0/24", "AZ 2")
+
+' Private Subnets
+Subnet(private_subnet1, "Private Subnet 1\n10.0.2.0/24", "AZ 1")
+Subnet(private_subnet2, "Private Subnet 2\n10.0.3.0/24", "AZ 2")
+
+' NAT Gateways - Single NAT Gateway for single-AZ mode
+rectangle "NAT Gateway\n+ Elastic IP\n💰 Single NAT GW" as nat1 #orange
+note right of nat1
+  Single NAT Gateway
+  Serves both private subnets
+  Cost: ~$32/month
+end note
+
+' Application Load Balancer
+ApplicationLoadBalancer(alb, "Application Load Balancer\nPort: 80, 443\nTarget Group: Port 3000")
+
+' ECS Components
+ECS(ecs_cluster, "ECS Cluster\nnodejs-fargate-app-cluster")
+Container(ecs_task1, "ECS Fargate Task 1\nNode.js App\nPort: 3000\nCPU: 256\nMemory: 512MB")
+Container(ecs_task2, "ECS Fargate Task 2\nNode.js App\nPort: 3000\nCPU: 256\nMemory: 512MB")
+
+' Security Groups
+rectangle "ALB Security Group\nInbound: 80, 443\nOutbound: All" as alb_sg #pink
+rectangle "ECS Tasks Security Group\nInbound: 3000 (from ALB)\nOutbound: All" as ecs_sg #pink
+
+' AWS Services
+ECR(ecr, "ECR Repository\nnodejs-fargate-app\nImage Scanning")
+CloudWatch(cloudwatch, "CloudWatch Logs\n/ecs/nodejs-fargate-app\nRetention: 7 days")
+IAMRole(task_exec_role, "IAM Role\nTask Execution Role")
+IAMRole(task_role, "IAM Role\nTask Role")
+
+' Connections
+internet --> igw
+igw --> vpc
+vpc --> az1
+vpc --> az2
+
+az1 --> public_subnet1
+az1 --> private_subnet1
+az2 --> public_subnet2
+az2 --> private_subnet2
+
+public_subnet1 --> nat1
+public_subnet1 --> alb
+public_subnet2 --> alb
+note right of public_subnet2
+  No NAT Gateway in AZ2
+  (Single-AZ mode)
+end note
+
+alb --> alb_sg
+alb_sg --> ecs_sg
+ecs_sg --> ecs_task1
+ecs_sg --> ecs_task2
+
+private_subnet1 --> ecs_task1
+private_subnet2 --> ecs_task2
+
+nat1 --> private_subnet1
+nat1 --> private_subnet2
+note right of nat1
+  Both private subnets
+  route through single
+  NAT Gateway
+end note
+
+ecs_cluster --> ecs_task1
+ecs_cluster --> ecs_task2
+
+ecr --> ecs_task1
+ecr --> ecs_task2
+
+ecs_task1 --> cloudwatch
+ecs_task2 --> cloudwatch
+
+task_exec_role --> ecs_task1
+task_exec_role --> ecs_task2
+task_role --> ecs_task1
+task_role --> ecs_task2
+
+' Route Tables
+rectangle "Public Route Table\n0.0.0.0/0 → IGW" as public_rt #lightcyan
+rectangle "Private Route Table 1\n0.0.0.0/0 → NAT GW" as private_rt1 #lightcyan
+rectangle "Private Route Table 2\n0.0.0.0/0 → NAT GW" as private_rt2 #lightcyan
+
+public_subnet1 ..> public_rt
+public_subnet2 ..> public_rt
+private_subnet1 ..> private_rt1
+private_subnet2 ..> private_rt2
+private_rt1 ..> nat1
+private_rt2 ..> nat1
+note right of private_rt2
+  Both route tables
+  use single NAT Gateway
+end note
+
+note right of vpc
+  **VPC Configuration:**
+  - CIDR: 10.0.0.0/16
+  - DNS Hostnames: Enabled
+  - DNS Support: Enabled
+  - Configuration: Single-AZ (multi_az = false)
+  - NAT Gateways: 1 (~$32/month)
+end note
+
+note right of alb
+  **Load Balancer:**
+  - Type: Application Load Balancer
+  - Scheme: Internet-facing
+  - Health Check: /health
+  - Auto Scaling: Enabled
+end note
+
+note right of ecs_cluster
+  **ECS Configuration:**
+  - Launch Type: Fargate
+  - Desired Count: 1
+  - Min Capacity: 1
+  - Max Capacity: 10
+  - Auto Scaling: CPU 70%, Memory 80%
+end note
+
+@enduml

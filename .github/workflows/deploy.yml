@@ -8,11 +8,13 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: dev #nodejs-fargate-app
+  ECR_REPOSITORY: nodejs-fargate-app
   ECS_SERVICE: nodejs-fargate-app-service
   ECS_CLUSTER: nodejs-fargate-app-cluster
   ECS_TASK_FAMILY: nodejs-fargate-app-task
   CONTAINER_NAME: nodejs-fargate-app
+  CODEDEPLOY_APP: nodejs-fargate-app-codedeploy-app
+  CODEDEPLOY_GROUP: nodejs-fargate-app-deployment-group
 
 jobs:
   deploy:
@@ -62,10 +64,88 @@ jobs:
         container-name: ${{ env.CONTAINER_NAME }}
         image: ${{ steps.build-image.outputs.image }}
 
-    - name: Deploy Amazon ECS task definition
-      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-      with:
-        task-definition: ${{ steps.task-def-updated.outputs.task-definition }}
-        service: ${{ env.ECS_SERVICE }}
-        cluster: ${{ env.ECS_CLUSTER }}
-        wait-for-service-stability: true
+    - name: Register new task definition
+      id: register-task-def
+      run: |
+        TASK_DEF_ARN=$(aws ecs register-task-definition \
+          --cli-input-json file://task-definition.json \
+          --query 'taskDefinition.taskDefinitionArn' \
+          --output text)
+        echo "task-def-arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+        echo "Registered task definition: $TASK_DEF_ARN"
+
+    - name: Get ECS service details and target groups for AppSpec
+      id: ecs-service-info
+      run: |
+        SERVICE_INFO=$(aws ecs describe-services \
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --services ${{ env.ECS_SERVICE }} \
+          --query 'services[0]')
+        
+        SUBNET_1=$(echo $SERVICE_INFO | jq -r '.networkConfiguration.awsvpcConfiguration.subnets[0]')
+        SUBNET_2=$(echo $SERVICE_INFO | jq -r '.networkConfiguration.awsvpcConfiguration.subnets[1]')
+        SECURITY_GROUP=$(echo $SERVICE_INFO | jq -r '.networkConfiguration.awsvpcConfiguration.securityGroups[0]')
+        CONTAINER_NAME=$(echo $SERVICE_INFO | jq -r '.loadBalancers[0].containerName')
+        CONTAINER_PORT=$(echo $SERVICE_INFO | jq -r '.loadBalancers[0].containerPort')
+        
+        echo "subnet-1=$SUBNET_1" >> $GITHUB_OUTPUT
+        echo "subnet-2=$SUBNET_2" >> $GITHUB_OUTPUT
+        echo "security-group=$SECURITY_GROUP" >> $GITHUB_OUTPUT
+        echo "container-name=$CONTAINER_NAME" >> $GITHUB_OUTPUT
+        echo "container-port=$CONTAINER_PORT" >> $GITHUB_OUTPUT
+
+    - name: Prepare AppSpec file
+      run: |
+        TASK_DEF_ARN="${{ steps.register-task-def.outputs.task-def-arn }}"
+        SUBNET_1="${{ steps.ecs-service-info.outputs.subnet-1 }}"
+        SUBNET_2="${{ steps.ecs-service-info.outputs.subnet-2 }}"
+        SECURITY_GROUP="${{ steps.ecs-service-info.outputs.security-group }}"
+        CONTAINER_NAME="${{ steps.ecs-service-info.outputs.container-name }}"
+        CONTAINER_PORT="${{ steps.ecs-service-info.outputs.container-port }}"
+        
+        cat > appspec.yml <<EOF
+        version: 0.0
+        Resources:
+          - TargetService:
+              Type: AWS::ECS::Service
+              Properties:
+                TaskDefinition: "$TASK_DEF_ARN"
+                LoadBalancerInfo:
+                  ContainerName: "$CONTAINER_NAME"
+                  ContainerPort: $CONTAINER_PORT
+                PlatformVersion: "LATEST"
+                NetworkConfiguration:
+                  AwsvpcConfiguration:
+                    Subnets:
+                      - "$SUBNET_1"
+                      - "$SUBNET_2"
+                    SecurityGroups:
+                      - "$SECURITY_GROUP"
+                    AssignPublicIp: "DISABLED"
+        EOF
+        
+        echo "Generated AppSpec file:"
+        cat appspec.yml
+
+    - name: Create CodeDeploy deployment
+      id: codedeploy-deployment
+      run: |
+        APPSPEC_CONTENT=$(cat appspec.yml | base64 -w 0)
+        DEPLOYMENT_ID=$(aws deploy create-deployment \
+          --application-name ${{ env.CODEDEPLOY_APP }} \
+          --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
+          --revision revisionType=AppSpecContent,appSpecContent="{content=\"$APPSPEC_CONTENT\"}" \
+          --query 'deploymentId' \
+          --output text)
+        echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+        echo "Created CodeDeploy deployment: $DEPLOYMENT_ID"
+
+    - name: Wait for deployment to complete
+      run: |
+        echo "Waiting for CodeDeploy deployment to complete..."
+        aws deploy wait deployment-successful \
+          --deployment-id ${{ steps.codedeploy-deployment.outputs.deployment-id }} || \
+        (aws deploy get-deployment \
+          --deployment-id ${{ steps.codedeploy-deployment.outputs.deployment-id }} \
+          --query 'deploymentInfo.status' && exit 1)
+        echo "Deployment completed successfully!"
