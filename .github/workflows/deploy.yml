@@ -86,22 +86,25 @@ jobs:
     - name: Get ECS service details and target groups for AppSpec
       id: ecs-service-info
       run: |
-        SERVICE_INFO=$(aws ecs describe-services \         
-          --cluster ${{ env.ECS_CLUSTER }} \
-          --services ${{ env.ECS_SERVICE }} \
+        # 1. Get service details into a single variable
+        SERVICE_INFO=$(aws ecs describe-services \
+          --cluster "$ECS_CLUSTER" \
+          --services "$ECS_SERVICE" \
           --query 'services[0]')
         
+        # 2. Parse values using jq
         SUBNET_1=$(echo $SERVICE_INFO | jq -r '.networkConfiguration.awsvpcConfiguration.subnets[0]')
         SUBNET_2=$(echo $SERVICE_INFO | jq -r '.networkConfiguration.awsvpcConfiguration.subnets[1]')
         SECURITY_GROUP=$(echo $SERVICE_INFO | jq -r '.networkConfiguration.awsvpcConfiguration.securityGroups[0]')
-        CONTAINER_NAME=$(echo $SERVICE_INFO | jq -r '.loadBalancers[0].containerName')
-        CONTAINER_PORT=$(echo $SERVICE_INFO | jq -r '.loadBalancers[0].containerPort')
+        CONT_NAME=$(echo $SERVICE_INFO | jq -r '.loadBalancers[0].containerName')
+        CONT_PORT=$(echo $SERVICE_INFO | jq -r '.loadBalancers[0].containerPort')
         
+        # 3. Write to GITHUB_OUTPUT
         echo "subnet-1=$SUBNET_1" >> $GITHUB_OUTPUT
         echo "subnet-2=$SUBNET_2" >> $GITHUB_OUTPUT
         echo "security-group=$SECURITY_GROUP" >> $GITHUB_OUTPUT
-        echo "container-name=$CONTAINER_NAME" >> $GITHUB_OUTPUT
-        echo "container-port=$CONTAINER_PORT" >> $GITHUB_OUTPUT
+        echo "container-name=$CONT_NAME" >> $GITHUB_OUTPUT
+        echo "container-port=$CONT_PORT" >> $GITHUB_OUTPUT
 
     - name: Prepare AppSpec file
       run: |
