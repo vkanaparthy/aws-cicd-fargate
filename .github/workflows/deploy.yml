@@ -8,6 +8,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
+  AWS_PROFILE: vk
   ECR_REPOSITORY: dev
   ECS_SERVICE: nodejs-fargate-app-service
   ECS_CLUSTER: nodejs-fargate-app-cluster
@@ -44,15 +45,16 @@ jobs:
         IMAGE_TAG: ${{ github.sha }}
       run: |
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest 
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG --profile ${{ env.AWS_PROFILE }}
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest --profile ${{ env.AWS_PROFILE }}
         echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
     - name: Download task definition from ECS
       id: task-def
       run: |
         aws ecs describe-task-definition \
+          --profile ${{ env.AWS_PROFILE }} \
           --task-definition ${{ env.ECS_TASK_FAMILY }} \
           --query 'taskDefinition' > task-definition.json
 
@@ -68,6 +70,7 @@ jobs:
       id: register-task-def
       run: |
         TASK_DEF_ARN=$(aws ecs register-task-definition \
+          --profile ${{ env.AWS_PROFILE }} \
           --cli-input-json file://task-definition.json \
           --query 'taskDefinition.taskDefinitionArn' \
           --output text)
@@ -78,6 +81,7 @@ jobs:
       id: ecs-service-info
       run: |
         SERVICE_INFO=$(aws ecs describe-services \
+          --profile ${{ env.AWS_PROFILE }} \
           --cluster ${{ env.ECS_CLUSTER }} \
           --services ${{ env.ECS_SERVICE }} \
           --query 'services[0]')
@@ -132,6 +136,7 @@ jobs:
       run: |
         APPSPEC_CONTENT=$(cat appspec.yml | base64 -w 0)
         DEPLOYMENT_ID=$(aws deploy create-deployment \
+          --profile ${{ env.AWS_PROFILE }} \
           --application-name ${{ env.CODEDEPLOY_APP }} \
           --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
           --revision revisionType=AppSpecContent,appSpecContent="{content=\"$APPSPEC_CONTENT\"}" \
@@ -144,8 +149,10 @@ jobs:
       run: |
         echo "Waiting for CodeDeploy deployment to complete..."
         aws deploy wait deployment-successful \
+          --profile ${{ env.AWS_PROFILE }} \
           --deployment-id ${{ steps.codedeploy-deployment.outputs.deployment-id }} || \
         (aws deploy get-deployment \
+          --profile ${{ env.AWS_PROFILE }}             
           --deployment-id ${{ steps.codedeploy-deployment.outputs.deployment-id }} \
           --query 'deploymentInfo.status' && exit 1)
         echo "Deployment completed successfully!"
